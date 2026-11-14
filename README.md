@@ -1,5 +1,7 @@
 # AHelperW Fishing
 
+[![CI](https://github.com/lanqvist/AHelperWFishing/actions/workflows/ci.yml/badge.svg)](https://github.com/lanqvist/AHelperWFishing/actions/workflows/ci.yml)
+
 Помощник рыбалки для **WoW Forever** (Windows 10/11, 64 бит). Программа следит за **твоим**
 поплавком на экране и подсекает по всплеску поклёвки; небольшой аддон показывает в игре HUD
 рыбалки (номер заброса, подтверждение улова, места в сумках, ошибки). Программа читает только
@@ -11,12 +13,16 @@
 
 Последняя версия — на странице [Releases](../../releases/latest):
 
-* **`AHelperWFishing-Setup-<версия>.exe`** — установщик: ставит программу и аддон, создаёт
-  ярлыки и запускает программу. Python не нужен.
-* `AHelperWFishing-<версия>.zip` — то же без установщика (распаковать, запустить
-  `InstallFishingAddon.cmd`, затем «Запустить рыбалку.cmd»).
+* **`AHelperWFishing-Setup-<версия>.exe`** — установщик. Права администратора не нужны:
+  ставит программу в `%LOCALAPPDATA%\Programs\AHelperWFishing`, находит папку игры и ставит
+  аддон, создаёт ярлык, регистрирует программу в «Параметры → Приложения». Обновление —
+  новый установщик поверх старого; настройки и записи сохраняются.
+* `AHelperWFishing-<версия>-portable.zip` — то же без установки: распаковать, запустить
+  `AHelperWFishing.exe`, аддон поставить кнопкой «Установить аддон в игру…».
+* `SHA256SUMS.txt` — контрольные суммы. Происхождение файлов можно проверить:
+  `gh attestation verify <файл> --repo lanqvist/AHelperWFishing`.
 
-Файлы не подписаны: Windows может показать «Неизвестный издатель» → «Подробнее» →
+Если сборка не подписана, Windows может показать «Неизвестный издатель» → «Подробнее» →
 «Выполнить в любом случае».
 
 ## Как начать
@@ -33,10 +39,67 @@
    **F8 — стоп** в любой момент. Программа останавливается сама при полных сумках, ошибках
    игры, открытом чате/меню, потере HUD и других проблемах.
 
-Подробная инструкция — `ПРОЧИТАЙ.txt` в папке программы (ярлык в меню «Пуск»).
+Подробная инструкция — [`ПРОЧИТАЙ.txt`](packaging/ПРОЧИТАЙ.txt) (ставится рядом с программой);
+устройство HUD и протокола — [docs/FISHING.md](docs/FISHING.md), распознавание —
+[docs/FISHING_VISION.md](docs/FISHING_VISION.md), изменения — [CHANGELOG.md](CHANGELOG.md).
 
 ## Если что-то пошло не так
 
-Журнал установки: `%TEMP%\AHelperWFishing-Setup.log`. Настройки и записи забросов:
-`%LOCALAPPDATA%\AHelperWForever`. Удаление — «Параметры → Приложения» или ярлык
-«Удалить AHelperW Fishing» в меню «Пуск» (аддон в игре и записи остаются).
+* Журнал программы: кнопка «Журнал» (`%LOCALAPPDATA%\AHelperWForever\logs\fishing.log`) —
+  приложи его к [сообщению об ошибке](../../issues).
+* Журнал установки: `%TEMP%\Setup Log <дата>.txt`.
+* Настройки и записи забросов: `%LOCALAPPDATA%\AHelperWForever` (кнопка «Папка данных»).
+* Удаление — «Параметры → Приложения → AHelperW Fishing»; установщик спросит, удалить ли
+  настройки и записи. Аддон в папке игры остаётся.
+* Тихая установка: `AHelperWFishing-Setup-<версия>.exe /VERYSILENT /GAME="<путь к _forever_>"`.
+
+## Разработка
+
+Нужны [uv](https://docs.astral.sh/uv/) и Windows; для установщика — [Inno Setup](https://jrsoftware.org/isinfo.php) 6.6+.
+
+```bash
+uv sync                          # окружение по uv.lock (Python 3.14, зависимости, pytest, ruff)
+```
+
+```bash
+uv run ahelperw-fishing          # запуск из исходников
+```
+
+```bash
+uv run pytest                    # тесты (GUI-тесты — только Windows; Lua-тест — если есть luajit)
+```
+
+```bash
+uv run ruff check . && uv run ruff format --check .
+```
+
+```bash
+uv sync --group build && uv run python tools/build.py   # dist/: установщик, portable.zip, SHA256SUMS.txt
+```
+
+Выпуск: поднять `__version__` в `src/ahelperw_fishing/__init__.py`, `## Version` в
+`src/ahelperw_fishing/addon/AHelperWFishing/AHelperWFishing.toc`, добавить раздел в
+`CHANGELOG.md` (тесты и сборка сверяют все три), затем `git tag vX.Y.Z && git push --tags` —
+GitHub Actions соберёт и опубликует релиз. Подпись кода включается секретами
+`SIGN_PFX_BASE64` / `SIGN_PFX_PASSWORD` (см. `.github/workflows/release.yml`).
+
+```
+src/ahelperw_fishing/
+  app.py         главное окно, цикл захвата → распознавание → контроллер → нажатие
+  protocol.py    пиксельный протокол HUD: декодирование, поиск HUD, экспорт
+  controller.py  детерминированный цикл рыбалки (без ввода)
+  vision.py      поиск своего поплавка и распознавание поклёвки (детектор 0.3.2)
+  sessions.py    запись забросов, метки, проверка на отложенных забросах
+  training.py    окно выбора зоны и разметки
+  capture.py     захват экрана (GDI, буферы переиспользуются)
+  winput.py      нажатия клавиш (SendInput / PostMessage)
+  win32.py       окно игры, видимость, один экземпляр, DPI, тема
+  addon.py       поиск игры и установка аддона (кнопка в программе и установщик)
+  settings.py    fishing.json / fishing-model.json с проверкой значений
+  logs.py, updates.py, paths.py, keys.py
+  addon/AHelperWFishing/   аддон HUD (Lua), встраивается в сборку
+packaging/       Inno Setup (.iss), значок, ПРОЧИТАЙ.txt, точка входа PyInstaller
+tools/build.py   сборка релиза
+```
+
+Аудит и обоснование изменений 0.4.0 — [docs/AUDIT-0.4.0.md](docs/AUDIT-0.4.0.md).

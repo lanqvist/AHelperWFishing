@@ -1,0 +1,86 @@
+[project]
+name = "ahelperw-fishing"
+dynamic = ["version"]
+description = "Fishing helper for WoW Forever: watches your bobber on screen and hooks on the bite splash."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "lanqvist" }]
+classifiers = [
+    "Private :: Do Not Upload",
+    "Environment :: Win32 (MS Windows)",
+    "Operating System :: Microsoft :: Windows :: Windows 10",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
+    "Programming Language :: Python :: 3",
+]
+dependencies = [
+    "numpy>=2,<3",
+    "pillow>=11,<13",
+    "sv-ttk>=2.6,<3",
+]
+
+[project.optional-dependencies]
+# Optional third capture backend; GDI (built in) and Pillow cover every supported system.
+mss = ["mss>=10,<11"]
+
+[project.gui-scripts]
+ahelperw-fishing = "ahelperw_fishing.app:main"
+
+[project.urls]
+Homepage = "https://github.com/lanqvist/AHelperWFishing"
+Issues = "https://github.com/lanqvist/AHelperWFishing/issues"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.14",
+]
+build = [
+    "pyinstaller>=6.16,<7",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.version]
+path = "src/ahelperw_fishing/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ahelperw_fishing"]
+
+[tool.uv]
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "gui: needs a Tk display (skipped when Tk cannot start)",
+    "windows: needs the Win32 API",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src", "tests", "tools"]
+
+[tool.ruff.format]
+quote-style = "single"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "I", "SIM", "RUF", "PL", "PTH"]
+ignore = [
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR2004",  # detector/controller logic is table-like by design
+    "PLW0603",                                              # module-level state is explicit where used
+    "SIM108",                                               # ternaries are not always clearer
+    "RUF001", "RUF002", "RUF003",                           # Cyrillic UI text is intentional
+    "E741",
+    "PLC0415",  # lazy imports keep startup and optional dependencies cheap
+    "SIM105",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["PTH", "PLR0917", "RUF059"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ahelperw_fishing"]

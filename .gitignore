@@ -1,0 +1,20 @@
+# Environments and caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Build output (tools/build.py)
+build/
+dist/
+*.spec
+
+# Personal data never belongs in the repo: settings, recordings, labels and logs
+# live in %LOCALAPPDATA%\AHelperWForever. Keep stray copies out as well.
+fishing.json
+fishing-model.json
+fishing-sessions/
+*.jsonl
+*.log
+Backups/
