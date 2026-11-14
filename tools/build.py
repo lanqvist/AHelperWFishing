@@ -43,10 +43,11 @@ def version():
 
 
 def check_versions(ver):
+    # The addon has its own version (## Version in its TOC): bump it whenever Fishing.lua
+    # changes. The app tells a stale addon apart by comparing the files, not the version.
     toc = (PACKAGE / 'addon' / APP / f'{APP}.toc').read_text(encoding='utf-8')
-    toc_version = re.search(r'^## Version: (\S+)', toc, re.MULTILINE).group(1)
-    if toc_version != ver:
-        raise SystemExit(f'Addon TOC version {toc_version} != package version {ver}')
+    if not re.search(r'^## Version: \d+\.\d+\.\d+', toc, re.MULTILINE):
+        raise SystemExit('Addon TOC has no ## Version')
     if f'## [{ver}]' not in (ROOT / 'CHANGELOG.md').read_text(encoding='utf-8'):
         raise SystemExit(f'CHANGELOG.md has no section for {ver}')
 

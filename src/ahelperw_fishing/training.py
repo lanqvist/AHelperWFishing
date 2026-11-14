@@ -9,6 +9,7 @@ from tkinter import messagebox, ttk
 
 from PIL import ImageDraw, ImageTk
 
+from . import zone
 from .sessions import SessionStore, TraceCache, evaluate, first_signal, labelled, replay, summary, trace_of
 from .vision import VisionParams
 
@@ -53,11 +54,20 @@ def overlay(image, result, max_size=(560, 380)):
 
 
 class RegionSelector(tk.Toplevel):
-    def __init__(self, parent, screenshot, callback):
+    """Place the fixed-size bite zone by clicking the bobber on a screenshot.
+
+    The zone follows the mouse, is always inside the window and never covers the HUD; the
+    mouse wheel changes its size within a safe range (zone.MIN_SCALE..MAX_SCALE).
+    """
+
+    def __init__(self, parent, screenshot, callback, hud=None, scale=1.0):
         super().__init__(parent)
-        self.title('Область заброса — обведи воду, куда падает поплавок')
+        self.title('Зона поклёвки — кликни по своему поплавку')
         self.original = screenshot
         self.callback = callback
+        self.hud = hud
+        self.screen = {'width': screenshot.width, 'height': screenshot.height}
+        self.zone_scale = scale
         preview = screenshot.copy()
         preview.thumbnail((1200, 700))
         self.scale_x = screenshot.width / preview.width
@@ -65,49 +75,73 @@ class RegionSelector(tk.Toplevel):
         self.photo = ImageTk.PhotoImage(preview)
         ttk.Label(
             self,
-            text='Зажми ЛКМ и обведи воду, куда падает поплавок при забросах, с запасом в 2–3 поплавка '
-            'по краям.\nНе включай персонажей, их имена, берег, лодки, фонари и интерфейс. '
-            'Чужие поплавки допустимы, но рядом с твоим подсечки не будет. Esc — отмена.',
+            text='Наведи рамку на свой поплавок (он в её центре) и кликни. Размер рамки подобран под экран: '
+            'поплавок падает в пределах неё с запасом.\nКолесо мыши — немного больше/меньше. Рамка не заходит '
+            'на HUD рыбалки и за край окна. Персонажи и берег в рамке нежелательны. Esc — отмена.',
         ).pack(padx=12, pady=8)
-        self.canvas = tk.Canvas(self, width=preview.width, height=preview.height, highlightthickness=0)
+        self.canvas = tk.Canvas(self, width=preview.width, height=preview.height, highlightthickness=0,
+                                cursor='crosshair')  # fmt: skip
         self.canvas.pack(padx=12, pady=8)
         self.canvas.create_image(0, 0, image=self.photo, anchor='nw')
-        self.start_point = None
-        self.rectangle = None
-        self.canvas.bind('<ButtonPress-1>', self.begin)
-        self.canvas.bind('<B1-Motion>', self.move)
+        if hud:
+            self.canvas.create_rectangle(*self._to_preview(hud), outline='#ff5a5a', width=2, dash=(4, 3))
+        self.rectangle = self.canvas.create_rectangle(0, 0, 0, 0, outline='#ffcc00', width=2)
+        self.cross = self.canvas.create_text(0, 0, text='+', fill='#ffcc00', font=('Segoe UI', 14, 'bold'))
+        self.size_text = tk.StringVar()
+        ttk.Label(self, textvariable=self.size_text).pack(pady=(0, 8))
+        self.region = None
+        self.last = (preview.width / 2, preview.height / 2)
+        self.canvas.bind('<Motion>', self.move)
         self.canvas.bind('<ButtonRelease-1>', self.finish)
+        self.canvas.bind('<MouseWheel>', self.wheel)
         self.bind('<Escape>', lambda _: self.destroy())
+        self.update_rectangle()
         self.lift()
         self.focus_force()
 
-    def point(self, event):
-        return max(0, min(event.x, self.photo.width())), max(0, min(event.y, self.photo.height()))
+    def _to_preview(self, r):
+        return (r['x'] / self.scale_x, r['y'] / self.scale_y,
+                (r['x'] + r['width']) / self.scale_x, (r['y'] + r['height']) / self.scale_y)  # fmt: skip
 
-    def begin(self, event):
-        self.start_point = self.point(event)
-        if self.rectangle:
-            self.canvas.delete(self.rectangle)
-        self.rectangle = self.canvas.create_rectangle(*self.start_point, *self.start_point, outline='#ffcc00', width=2)
+    def update_rectangle(self):
+        x, y = self.last
+        center = (x * self.scale_x, y * self.scale_y)
+        size = zone.default_size(self.screen, self.zone_scale)
+        try:
+            self.region = zone.place(center, size, self.screen, self.hud)
+        except ValueError as exc:
+            self.region = None
+            self.size_text.set(str(exc))
+            return
+        self.canvas.coords(self.rectangle, *self._to_preview(self.region))
+        self.canvas.coords(self.cross, x, y)
+        self.size_text.set(f'Зона {self.region["width"]}×{self.region["height"]} '
+                           f'({round(self.zone_scale * 100)}% от рекомендуемой)')  # fmt: skip
 
     def move(self, event):
-        if self.start_point:
-            self.canvas.coords(self.rectangle, *self.start_point, *self.point(event))
+        self.last = (event.x, event.y)
+        self.update_rectangle()
+
+    def wheel(self, event):
+        step = 0.1 if event.delta > 0 else -0.1
+        self.zone_scale = round(max(zone.MIN_SCALE, min(zone.MAX_SCALE, self.zone_scale + step)), 2)
+        self.update_rectangle()
 
     def finish(self, event):
-        if not self.start_point:
+        self.last = (event.x, event.y)
+        self.update_rectangle()
+        if self.region is None:
             return
-        x1, y1 = self.start_point
-        x2, y2 = self.point(event)
-        left, right = sorted((round(x1 * self.scale_x), round(x2 * self.scale_x)))
-        top, bottom = sorted((round(y1 * self.scale_y), round(y2 * self.scale_y)))
-        region = dict(x=left, y=top, width=right - left, height=bottom - top)
         try:
-            self.callback(region)
+            self.callback(dict(self.region), self.zone_scale)
         except Exception as exc:
-            messagebox.showerror('Область', str(exc), parent=self)
+            messagebox.showerror('Зона', str(exc), parent=self)
             return
         self.destroy()
+
+    def destroy(self):
+        self.photo = None
+        super().destroy()
 
 
 class CastLabelWindow(tk.Toplevel):

@@ -33,7 +33,8 @@ def game(tmp_path):
 # -- versions -------------------------------------------------------------------
 def test_versions_match():
     toc = (bundled_addon() / 'AHelperWFishing.toc').read_text(encoding='utf-8')
-    assert re.search(r'^## Version: (\S+)', toc, re.MULTILINE).group(1) == __version__
+    addon_version = re.search(r'^## Version: (\S+)', toc, re.MULTILINE).group(1)
+    assert updates.parse_version(addon_version) <= updates.parse_version(__version__)
     changelog = (ROOT / 'CHANGELOG.md').read_text(encoding='utf-8')
     assert f'## [{__version__}]' in changelog
 
@@ -45,7 +46,15 @@ def test_install_fresh(game, data_dir):
     assert result.installed and result.target == target and result.backup is None
     for name in addon.ADDON_FILES:
         assert (target / name).read_bytes() == (bundled_addon() / name).read_bytes()
-    assert addon.addon_version(target) == __version__
+    assert addon.addon_version(target) == addon.addon_version(bundled_addon())
+
+
+def test_is_current(game):
+    assert not addon.is_current(game)
+    addon.install(game)
+    assert addon.is_current(game)
+    (game / 'Interface' / 'AddOns' / 'AHelperWFishing' / 'Fishing.lua').write_text('-- edited', encoding='utf-8')
+    assert not addon.is_current(game)
 
 
 def test_reinstall_same_version_is_noop(game, data_dir):
