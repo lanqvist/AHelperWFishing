@@ -55,7 +55,7 @@ jobs:
       - run: uv sync --locked --group build
       - run: uv run --no-sync python tools/build.py
 
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             dist/AHelperWFishing-Setup-*.exe
