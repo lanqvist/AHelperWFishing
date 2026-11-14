@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: AHelperW Fishing
+## Notes: Fishing HUD for the AHelperW fishing helper (cast, catch, bags, errors)
+## Author: lanqvist
+## Version: 0.4.0
+## SavedVariables: AHelperWFishingDB
+
+Fishing.lua

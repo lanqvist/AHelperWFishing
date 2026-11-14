@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked --only-group dev --no-install-project
+      - run: uv run --no-sync ruff check src tests tools packaging
+      - run: uv run --no-sync ruff format --check src tests tools packaging
+
+  addon:
+    name: Lua HUD addon
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: sudo apt-get update && sudo apt-get install -y luajit
+      - run: luajit tests/test_fishing.lua src/ahelperw_fishing/addon/AHelperWFishing/Fishing.lua
+
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run --no-sync pytest
+
+  build:
+    needs: [lint, addon, test]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+      - run: uv sync --locked --group build
+      - run: uv run --no-sync python tools/build.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AHelperWFishing-${{ github.sha }}
+          path: |
+            dist/*.exe
+            dist/*.zip
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 14
