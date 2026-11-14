@@ -95,6 +95,13 @@ def installed_addon(game):
     return Path(game) / 'Interface' / 'AddOns' / ADDON
 
 
+def is_current(game, source=None):
+    """The addon in the game has exactly the files bundled with this build."""
+    source = Path(source or bundled_addon())
+    target = installed_addon(game)
+    return all(_same(source / name, target / name) for name in ADDON_FILES)
+
+
 def combat_has_fishing(addons):
     """The combat addon already embeds the fishing HUD (a second one would show two HUDs)."""
     toc = Path(addons) / COMBAT_ADDON / f'{COMBAT_ADDON}.toc'

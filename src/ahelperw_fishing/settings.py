@@ -29,6 +29,8 @@ class Settings:
     background: bool = False
     fps: int = 30
     check_updates: bool = True
+    return_focus: bool = True  # background mode: give focus back after a press
+    zone_scale: float = 1.0  # bite zone size relative to zone.default_size
     problems: list = field(default_factory=list, repr=False, compare=False)
 
     def to_dict(self):
@@ -84,6 +86,8 @@ def _validators():
         'background': boolean,
         'fps': lambda v: choice(FPS_CHOICES)(int(v)),  # older versions stored a string
         'check_updates': boolean,
+        'return_focus': boolean,
+        'zone_scale': number(0.7, 1.6, float),
     }
 
 

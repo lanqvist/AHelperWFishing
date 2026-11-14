@@ -15,6 +15,8 @@ HEARTBEAT_TIMEOUT = 0.8  # s without a new HUD heartbeat -> stop
 CAST_TIMEOUT = 40.0  # s: longest fishing channel plus margin
 PRESS_TIMEOUT = 4.0  # s for the game to confirm a press
 STOP_AFTER_RUN = 3  # escapes / false hooks in a row that stop the run
+PRESS_WINDOW = 0.6  # s after the bite signal; a hook that could not be sent by then is dropped
+START_WAIT = 60.0  # s to wait at start for a cast or loot window in progress to finish
 
 PHASE_REASONS = {
     'idle': 'Готов к забросу',
@@ -24,6 +26,7 @@ PHASE_REASONS = {
     'wait_loot': 'Жду подтверждения добычи этого заброса',
     'await_recast': 'Добыча подтверждена; жду автоматический перезаброс',
     'cooldown': 'Пауза перед следующим забросом',
+    'warmup': 'Жду окончания текущего заброса и закрытия окна добычи',
 }
 
 
@@ -61,6 +64,7 @@ class FishingController:
         self.deadline = None
         self.cycles = 0
         self.pending = None
+        self.pending_at = None
         self.no_signal_run = 0
         self.escaped_run = 0
         self.false_run = 0
@@ -91,6 +95,25 @@ class FishingController:
         self.stats.casts += 1
         self.event(now, 'cast_started', serial=obs.cast)
 
+    def _pending_valid(self, obs, now):
+        """A pending press still makes sense on this frame; otherwise it is dropped.
+
+        A hook waits only while its cast is on and the bite is recent (the fish escapes
+        ~0.7-0.9 s after the splash); a cast only while the character is idle. A press can be
+        delayed by keys the user holds or by a busy focus switch in background mode.
+        """
+        if self.pending == 'interact':
+            if obs.state == 'fishing' and obs.cast == self.cast and now - self.pending_at <= PRESS_WINDOW:
+                return True
+            self.event(now, 'press_dropped', action='interact', state=obs.state)
+            self.pending = None
+            return False
+        if self.pending == 'cast' and obs.state != 'idle':
+            self.event(now, 'press_dropped', action='cast', state=obs.state)
+            self.pending = None
+            return False
+        return True
+
     def _cooldown(self, now, seconds=0.8):
         self.phase, self.idle_at, self.deadline = 'cooldown', None, now + seconds
 
@@ -107,10 +130,14 @@ class FishingController:
             if self.heartbeat_changes < 3:
                 return None
             if obs.state != 'idle':
-                self.stop('Начни с завершённого заброса и закрытого окна добычи')
+                # Started mid-cast or with the loot window open: wait for it to finish.
+                if now - self.started > START_WAIT:
+                    self.stop('Начни с завершённого заброса и закрытого окна добычи')
+                    return None
+                self.reason = PHASE_REASONS['warmup']
                 return None
             self.phase = 'idle'
-        if self.pending:
+        if self.pending and self._pending_valid(obs, now):
             return self.pending
         self._advance(obs, now, bite)
         self.reason = PHASE_REASONS.get(self.phase, self.reason)
@@ -184,6 +211,15 @@ class FishingController:
 
     def _advance(self, obs, now, bite):
         if self.phase == 'idle':
+            if obs.state == 'fishing' and obs.cast != self.cast:
+                # The player cast by hand (or the game recast): fish this cast.
+                self.event(now, 'cast_adopted', serial=obs.cast)
+                self.loot = obs.loot
+                self._begin_wait(obs, now)
+                return
+            if obs.state == 'loot':
+                self.idle_at = None  # loot window still open: wait
+                return
             if obs.state != 'idle':
                 self.stop('Неожиданное изменение состояния перед забросом')
                 return
@@ -191,7 +227,7 @@ class FishingController:
                 self.idle_at = now
             if now - self.idle_at >= 0.5:
                 self.cast, self.loot = obs.cast, obs.loot
-                self.pending = 'cast'
+                self.pending, self.pending_at = 'cast', now
         elif self.phase == 'wait_cast':
             if obs.state == 'fishing' and obs.cast != self.cast:
                 self._begin_wait(obs, now)
@@ -236,12 +272,12 @@ class FishingController:
                 and bite.captured_at >= self.cast_seen_at
             ):
                 self.loot = obs.loot
-                self.pending = 'interact'
+                self.pending, self.pending_at = 'interact', now
         elif obs.progress > self.mark + 0.05:
             self.stop('Отметка пропущена; проверь скорость захвата и настройку')
         elif obs.progress >= self.mark:
             self.loot = obs.loot
-            self.pending = 'interact'
+            self.pending, self.pending_at = 'interact', now
 
     def _wait_loot(self, obs, now):
         if self._confirmed(obs, self.cast):

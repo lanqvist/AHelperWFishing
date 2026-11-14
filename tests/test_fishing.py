@@ -162,11 +162,25 @@ class CycleTests(unittest.TestCase):
             self.assertIsNone(c.step(sample, 2))
             self.assertEqual(c.phase, 'stopped')
 
-    def test_start_during_channel_is_rejected(self):
+    def test_start_during_channel_waits_for_it_to_end(self):
+        c = FishingController()
+        for t in (0, 0.1, 0.2, 0.3):
+            self.assertIsNone(c.step(observation(t, state='fishing'), t))
+        self.assertEqual(c.phase, 'warmup')
+        self.assertIn('Жду окончания', c.reason)
+        for t in (0.4, 0.5, 1.0):
+            c.step(observation(t, state='idle'), t)
+        self.assertEqual(c.phase, 'idle')
+        self.assertEqual(c.step(observation(1.0, state='idle'), 1.0), 'cast')
+
+    def test_start_wait_has_a_limit(self):
         c = FishingController()
         for t in (0, 0.1, 0.2):
-            c.step(observation(t, state='fishing'), t)
+            c.step(observation(t, state='loot'), t)
+        for t in [0.3 + 0.2 * i for i in range(310)]:
+            c.step(observation(t, state='loot'), t)
         self.assertEqual(c.phase, 'stopped')
+        self.assertIn('Начни с завершённого заброса', c.reason)
 
     def test_rollover_and_no_unsent_transition(self):
         c = self.ready()
@@ -197,6 +211,48 @@ def v2(t, **kw):
 
 
 class V2CycleTests(unittest.TestCase):
+    def armed_cast(self):
+        c = FishingController(mode='vision')
+        for t in (0, 0.1, 0.2):
+            c.step(v2(t), t)
+        self.assertEqual(c.step(v2(0.8), 0.8), 'cast')
+        c.sent('cast', 0.8)
+        c.step(v2(0.9, state='fishing', cast=4), 0.9)
+        return c
+
+    def test_manual_cast_is_adopted(self):
+        c = FishingController(mode='vision')
+        for t in (0, 0.1, 0.2):
+            c.step(v2(t), t)
+        # The player casts before our 0.5 s idle pause ends.
+        self.assertIsNone(c.step(v2(0.4, state='fishing', cast=4), 0.4))
+        self.assertEqual((c.phase, c.cast, c.stats.casts), ('wait_bite', 4, 1))
+        self.assertEqual(c.step(v2(1, state='fishing', cast=4), 1, BiteSignal(1, 4)), 'interact')
+
+    def test_pending_cast_dropped_when_player_casts(self):
+        c = FishingController(mode='vision')
+        for t in (0, 0.1, 0.2):
+            c.step(v2(t), t)
+        self.assertEqual(c.step(v2(0.8), 0.8), 'cast')  # not sent (e.g. a key is held)
+        self.assertIsNone(c.step(v2(0.9, state='fishing', cast=4), 0.9))
+        self.assertEqual((c.phase, c.cast, c.pending), ('wait_bite', 4, None))
+        self.assertTrue(any(e['kind'] == 'press_dropped' for e in c.stats.events))
+
+    def test_hook_not_sent_in_time_is_dropped(self):
+        c = self.armed_cast()
+        self.assertEqual(c.step(v2(1, state='fishing', cast=4), 1, BiteSignal(1, 4)), 'interact')
+        self.assertEqual(c.step(v2(1.3, state='fishing', cast=4), 1.3), 'interact')  # still in time
+        self.assertIsNone(c.step(v2(1.7, state='fishing', cast=4), 1.7))  # fish is gone
+        self.assertEqual((c.phase, c.pending), ('wait_bite', None))
+        with self.assertRaises(ValueError):
+            c.sent('interact', 1.7)
+
+    def test_hook_dropped_when_cast_ends(self):
+        c = self.armed_cast()
+        self.assertEqual(c.step(v2(1, state='fishing', cast=4), 1, BiteSignal(1, 4)), 'interact')
+        self.assertIsNone(c.step(v2(1.1, state='idle', cast=4), 1.1))
+        self.assertEqual((c.phase, c.stats.no_signal), ('cooldown', 1))
+
     def wait_loot(self, auto_recast=False):
         c = FishingController(mode='vision', auto_recast=auto_recast)
         for t in (0, 0.1, 0.2):

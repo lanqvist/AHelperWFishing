@@ -149,53 +149,102 @@ class AppTests(unittest.TestCase):
     def background_setup(self):
         self.app.background.set(True)
         self.app.same_key.set(False)
-        self.app.cast_key.set('0')
+        self.app.cast_key.set('Shift+Q')
         self.app.interact_key.set('9')
-        self.post_patch = patch.object(self.module, 'post_pulse', return_value='sent')
-        self.post = self.post_patch.start()
-        self.addCleanup(self.post_patch.stop)
-        self.vis_patch = patch.object(self.module, 'visible', return_value=True)
-        self.vis = self.vis_patch.start()
-        self.addCleanup(self.vis_patch.stop)
-        self.fg_patch = patch.object(self.module, 'foreground_window', return_value=999)
-        self.fg_patch.start()
-        self.addCleanup(self.fg_patch.stop)
-
-    def test_background_keeps_running_and_posts_to_game_window(self):
-        self.background_setup()
+        self.foreground = 999  # another window has focus
+        patches = {
+            'post_pulse': patch.object(self.module, 'post_pulse', return_value='sent'),
+            'visible': patch.object(self.module, 'visible', return_value=True),
+            'foreground_window': patch.object(self.module, 'foreground_window', side_effect=lambda: self.foreground),
+            'activate': patch.object(self.module, 'activate', side_effect=self.fake_activate),
+            'input_busy': patch.object(self.module, 'input_busy', return_value=False),
+            'restore_foreground': patch.object(self.module, 'restore_foreground', return_value=True),
+        }
+        self.mocks = {}
+        for name, p in patches.items():
+            self.mocks[name] = p.start()
+            self.addCleanup(p.stop)
+        self.post, self.vis = self.mocks['post_pulse'], self.mocks['visible']
         self.app.auto.set(True)
         self.app.start()
-        self.app.sample()
+        self.foreground = 123
+        self.app.sample()  # window acquired while the game is in front
+        self.foreground = 999
         self.focus.side_effect = lambda screen=None, hwnd=None: (
             (123, 0, 0, 1920, 1080) if hwnd == 123 else (_ for _ in ()).throw(ValueError('Forever не в фокусе'))
         )
+
+    def fake_activate(self, hwnd, timeout=0.25):
+        self.foreground = hwnd
+        return True
+
+    def hook_now(self):
         controller = Mock(phase='wait_bite', reason='wait', cycles=0, mode='mark')
         controller.step.return_value = 'interact'
+        controller.rearm = None
         self.app.controller = controller
         self.app.sample()
+        return controller
+
+    def test_background_switches_to_game_presses_and_returns_focus(self):
+        self.background_setup()
+        controller = self.hook_now()
         self.assertTrue(self.app.running)
+        self.mocks['activate'].assert_called_once_with(123)
+        self.send.assert_called_once()
+        self.assertEqual(self.send.call_args.args[0], self.module.binding('9'))
+        self.assertTrue(self.send.call_args.args[1]())  # guard: the game is in front now
+        self.assertEqual(controller.sent.call_args.args[0], 'interact')
+        self.post.assert_not_called()
+        self.app.update()
+        self.app.after(150, self.app.quit)
+        self.app.mainloop()
+        self.mocks['restore_foreground'].assert_called_once_with(999, 123)
+
+    def test_background_allows_modifier_keys(self):
+        self.background_setup()
+        self.assertTrue(self.app.running)
+        self.assertEqual(self.app.bindings['cast']['modifiers'], ['SHIFT'])
+
+    def test_background_waits_while_user_types(self):
+        self.background_setup()
+        self.mocks['input_busy'].return_value = True
+        controller = self.hook_now()
+        self.assertTrue(self.app.running)
+        self.mocks['activate'].assert_not_called()
+        self.send.assert_not_called()
+        controller.sent.assert_not_called()
+        self.assertIn('Отпусти клавиши', self.app.status.get())
+
+    def test_background_refused_switch_posts_plain_key(self):
+        self.background_setup()
+        self.mocks['activate'].side_effect = None
+        self.mocks['activate'].return_value = False
+        controller = self.hook_now()
         self.post.assert_called_once()
         self.assertEqual(self.post.call_args.args[0], 123)
         self.send.assert_not_called()
+        self.assertEqual(controller.sent.call_args.args[0], 'interact')
+
+    def test_background_refused_switch_with_modifier_stops(self):
+        self.background_setup()
+        self.mocks['activate'].side_effect = None
+        self.mocks['activate'].return_value = False
+        controller = Mock(phase='idle', reason='ready', cycles=0, mode='mark')
+        controller.step.return_value = 'cast'  # Shift+Q cannot be posted
+        controller.rearm = None
+        self.app.controller = controller
+        self.app.sample()
+        self.assertFalse(self.app.running)
+        self.post.assert_not_called()
+        controller.sent.assert_not_called()
 
     def test_background_covered_window_stops_auto(self):
         self.background_setup()
-        self.app.auto.set(True)
-        self.app.start()
-        self.app.sample()
         self.vis.return_value = False
         self.app.sample()
         self.assertFalse(self.app.running)
         self.post.assert_not_called()
-
-    def test_background_rejects_modifier_keys(self):
-        self.background_setup()
-        self.app.cast_key.set('Shift+Q')
-        self.app.auto.set(True)
-        with patch.object(self.module.messagebox, 'showerror') as error:
-            self.app.start()
-        error.assert_called_once()
-        self.assertFalse(self.app.running)
 
     def test_held_modifier_delays_press_instead_of_stopping(self):
         self.app.auto.set(True)

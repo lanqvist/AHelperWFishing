@@ -1,6 +1,7 @@
 """Win32 helpers: the game window, visibility, single instance, DPI and window theme."""
 
 import ctypes as ct
+import time
 import winreg
 from ctypes import wintypes as wt
 from pathlib import Path
@@ -10,6 +11,7 @@ _K = ct.WinDLL('kernel32', use_last_error=True)
 
 _U.GetForegroundWindow.restype = wt.HWND
 _U.GetWindowThreadProcessId.argtypes = [wt.HWND, ct.POINTER(wt.DWORD)]
+_U.GetWindowThreadProcessId.restype = wt.DWORD
 _U.GetClientRect.argtypes = [wt.HWND, ct.POINTER(wt.RECT)]
 _U.ClientToScreen.argtypes = [wt.HWND, ct.POINTER(wt.POINT)]
 _U.IsWindow.argtypes = [wt.HWND]
@@ -153,4 +155,70 @@ def set_dark_title_bar(tk_window, dark):
                 return True
     except (AttributeError, OSError):
         pass
+    return False
+
+
+# -- bringing the game to the front (background mode) -------------------------------
+_U.SetForegroundWindow.argtypes = [wt.HWND]
+_U.BringWindowToTop.argtypes = [wt.HWND]
+_U.AttachThreadInput.argtypes = [wt.DWORD, wt.DWORD, wt.BOOL]
+_U.GetAsyncKeyState.argtypes = [ct.c_int]
+_U.GetAsyncKeyState.restype = ct.c_short
+_K.GetCurrentThreadId.restype = wt.DWORD
+_U.keybd_event.argtypes = [wt.BYTE, wt.BYTE, wt.DWORD, ct.c_size_t]
+_VK_MENU, _KEYEVENTF_KEYUP = 0x12, 0x2
+# Mouse buttons and every keyboard key except toggle-state keys (Caps/Num/Scroll Lock).
+_INPUT_KEYS = tuple(vk for vk in range(1, 255) if vk not in (0x14, 0x90, 0x91))
+
+
+def input_busy():
+    """The user is holding a key or mouse button right now (typing, dragging, clicking).
+
+    A focus switch at that moment would send the rest of the user's input to the game.
+    """
+    return any(_U.GetAsyncKeyState(vk) & 0x8000 for vk in _INPUT_KEYS)
+
+
+def _wait_foreground(hwnd, timeout):
+    end = time.perf_counter() + timeout
+    while time.perf_counter() < end:
+        if _U.GetForegroundWindow() == hwnd:
+            return True
+        time.sleep(0.005)
+    return _U.GetForegroundWindow() == hwnd
+
+
+def activate(hwnd, timeout=0.25):
+    """Bring ``hwnd`` to the foreground; True if it is the foreground window afterwards.
+
+    Windows only lets the foreground process (or the one that got the last input) change
+    the foreground window. Attaching to the foreground thread's input usually satisfies
+    that; if not, a synthetic Alt tap (the documented workaround) does.
+    """
+    if _U.GetForegroundWindow() == hwnd:
+        return True
+    if not _U.IsWindow(hwnd) or _U.IsIconic(hwnd):
+        return False
+    me = _K.GetCurrentThreadId()
+    foreground = _U.GetForegroundWindow()
+    other = _U.GetWindowThreadProcessId(foreground, None) if foreground else 0
+    attached = bool(other) and other != me and bool(_U.AttachThreadInput(me, other, True))
+    try:
+        _U.BringWindowToTop(hwnd)
+        _U.SetForegroundWindow(hwnd)
+    finally:
+        if attached:
+            _U.AttachThreadInput(me, other, False)
+    if _wait_foreground(hwnd, timeout / 2):
+        return True
+    _U.keybd_event(_VK_MENU, 0, 0, 0)
+    _U.keybd_event(_VK_MENU, 0, _KEYEVENTF_KEYUP, 0)
+    _U.SetForegroundWindow(hwnd)
+    return _wait_foreground(hwnd, timeout / 2)
+
+
+def restore_foreground(previous, expected):
+    """Give focus back to ``previous`` if the game (``expected``) still has it."""
+    if previous and previous != expected and _U.GetForegroundWindow() == expected and _U.IsWindow(previous):
+        return activate(previous, timeout=0.2)
     return False

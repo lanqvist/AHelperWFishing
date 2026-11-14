@@ -4,7 +4,7 @@ Reads screen pixels only (a small in-game HUD addon plus the water zone); never 
 game memory. Automatic key presses are off by default; F8 always stops.
 """
 
-__version__ = '0.4.0'
+__version__ = '0.4.1'
 APP_NAME = 'AHelperW Fishing'
 APP_ID = 'AHelperWFishing'
 REPOSITORY = 'lanqvist/AHelperWFishing'

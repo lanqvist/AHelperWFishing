@@ -16,7 +16,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from PIL import ImageTk
 
-from . import APP_NAME, __version__, addon, logs, settings, updates
+from . import APP_NAME, __version__, addon, logs, settings, updates, zone
 from .capture import HudCapture
 from .controller import FishingController
 from .keys import KEYS, STOP_KEY, binding
@@ -27,10 +27,13 @@ from .training import PHASE_NAMES, CastLabelWindow, RegionSelector, overlay
 from .vision import VisionParams, VisionSession, validate_region
 from .win32 import (
     SingleInstance,
+    activate,
     enable_dpi_awareness,
     foreground_window,
     game_window,
+    input_busy,
     message_box,
+    restore_foreground,
     set_dark_title_bar,
     system_uses_dark_theme,
     visible,
@@ -42,6 +45,8 @@ MODES = {'По изображению поплавка': 'vision', 'По отм�
 MODE_LABELS = {v: k for k, v in MODES.items()}
 FPS_CHOICES = tuple(str(f) for f in settings.FPS_CHOICES)
 ACQUIRE_SECONDS = 20  # time to switch to the game after "Начать"
+FOCUS_SETTLE = 0.03  # s between bringing the game to the front and the key press
+RETURN_FOCUS_MS = 80  # give focus back after the key-up has reached the game
 
 
 def apply_theme(root):
@@ -130,6 +135,7 @@ class FishingApp(tk.Tk):
         self.scores = deque(maxlen=150)
         self.timing = {name: deque(maxlen=200) for name in ('grab', 'vision', 'loop')}
         self.timing['press'] = deque(maxlen=50)
+        self.timing['switch'] = deque(maxlen=50)
         self.last_ui = 0
         self.last_relocate = 0
         self.started_at = 0
@@ -139,6 +145,9 @@ class FishingApp(tk.Tk):
         self.auto = tk.BooleanVar(value=False)
         self.record = tk.BooleanVar(value=True)
         self.background = tk.BooleanVar(value=False)
+        self.return_focus = tk.BooleanVar(value=True)
+        self.zone_scale = 1.0
+        self.landings = deque(maxlen=12)  # recent bobber positions (window px) for re-centring
         self.check_updates = tk.BooleanVar(value=True)
         self.fps = tk.StringVar(value='30')
         self.same_key = tk.BooleanVar(value=True)
@@ -185,7 +194,8 @@ class FishingApp(tk.Tk):
             wraplength=1160,
             justify='left',
             text=(
-                '1. В игре /ahwfish (HUD рыбалки), включи автосбор добычи.  2. «Найти HUD» и «Выделить зону».  '
+                '1. В игре /ahwfish (HUD рыбалки), включи автосбор добычи.  '
+                '2. «Найти HUD», забросить удочку, «Указать поплавок».  '
                 '3. Наблюдение без автонажатий: рыбачь вручную, кадры записываются.  4. «Разметить и проверить»: '
                 'отметь первый кадр поклёвки в каждом забросе и запусти проверку.  5. Снова наблюдение на новых '
                 'забросах.  6. Только после этого — автонажатия. F8 — стоп.'
@@ -203,10 +213,12 @@ class FishingApp(tk.Tk):
         self.paste_button = ttk.Button(prep, text='Вставить экспорт', command=self.paste)
         self.paste_button.grid(row=0, column=2, sticky='e')
         self.select_button = ttk.Button(
-            prep, text='Выделить зону через 3 с', command=lambda: self.delayed(self.select_region)
+            prep, text='Указать поплавок через 3 с', command=lambda: self.delayed(self.select_region)
         )
         self.select_button.grid(row=1, column=0, sticky='w', pady=4)
-        ttk.Label(prep, textvariable=self.region_status).grid(row=1, column=1, columnspan=2, sticky='w', padx=8)
+        ttk.Label(prep, textvariable=self.region_status).grid(row=1, column=1, sticky='w', padx=8)
+        self.recenter_button = ttk.Button(prep, text='Подвинуть зону к поплавку', command=self.recenter_region)
+        self.recenter_button.grid(row=1, column=2, sticky='e')
         self.controls = []
         for row, (label, variable) in enumerate(
             (('Клавиша заброса', self.cast_key), ('Клавиша взаимодействия', self.interact_key)), 2
@@ -264,17 +276,21 @@ class FishingApp(tk.Tk):
         ttk.Button(run, text='Стоп · F8', command=lambda: self.stop('Остановлено пользователем')).pack(
             side='left', padx=8
         )
+        background = ttk.Frame(outer)
+        background.pack(anchor='w', fill='x')
         self.background_check = ttk.Checkbutton(
-            outer,
+            background,
             variable=self.background,
-            text='Работать в фоне: игра видна на экране, фокус может быть в другом окне '
-            '(клавиши без Shift/Ctrl/Alt; перекрытое окно — стоп)',
+            text='Работать в фоне: окно игры видно на экране, перед нажатием программа сама переключается в игру',
         )
-        self.background_check.pack(anchor='w')
+        self.background_check.pack(side='left')
+        self.return_check = ttk.Checkbutton(background, variable=self.return_focus,
+                                            text='и возвращает фокус обратно')  # fmt: skip
+        self.return_check.pack(side='left', padx=(8, 0))
         self.session_controls = [
             self.same_check, self.recast_check, self.mode_choice, self.select_button, self.hud_button,
             self.paste_button, self.record_check, self.auto_check, self.background_check, self.fps_choice,
-            self.start_button, self.train_button, self.addon_button,
+            self.start_button, self.train_button, self.addon_button, self.recenter_button, self.return_check,
         ]  # fmt: skip
         ttk.Label(outer, textvariable=self.status, wraplength=1160, font=('Segoe UI', 11, 'bold')).pack(anchor='w')
         ttk.Label(outer, textvariable=self.observed, wraplength=1160).pack(anchor='w')
@@ -336,10 +352,10 @@ class FishingApp(tk.Tk):
         bundled = addon.addon_version(addon.bundled_addon())
         if installed is None:
             text = f'Аддон в игре не установлен ({game}).'
-        elif installed != bundled:
+        elif not addon.is_current(game):
             text = f'В игре аддон {installed}, в программе {bundled} — обнови аддон и сделай /reload.'
         else:
-            text = f'Аддон {installed} установлен в игре.'
+            text = f'Аддон {installed} установлен в игре и актуален.'
         self.addon_status.set(text)
 
     def install_addon(self):
@@ -397,6 +413,8 @@ class FishingApp(tk.Tk):
         self.recasts.set(prefs.auto_recast)
         self.background.set(prefs.background)
         self.check_updates.set(prefs.check_updates)
+        self.return_focus.set(prefs.return_focus)
+        self.zone_scale = prefs.zone_scale
         self.fps.set(str(prefs.fps))
         self.mode.set(MODE_LABELS[prefs.mode])
         self.cast_key.set(prefs.cast)
@@ -432,6 +450,8 @@ class FishingApp(tk.Tk):
             background=self.background.get(),
             fps=int(self.fps.get()),
             check_updates=self.check_updates.get(),
+            return_focus=self.return_focus.get(),
+            zone_scale=self.zone_scale,
         )
 
     def save_settings(self):
@@ -522,19 +542,40 @@ class FishingApp(tk.Tk):
     def select_region(self):
         shot = self.find_hud()
 
-        def selected(region):
-            r = self.cfg['rect']
-            if not (
-                region['x'] + region['width'] <= r['x']
-                or r['x'] + r['width'] <= region['x']
-                or region['y'] + region['height'] <= r['y']
-                or r['y'] + r['height'] <= region['y']
-            ):
-                raise ValueError('Зона пересекает HUD рыбалки; выдели только воду')
+        def selected(region, scale):
+            # zone.place already keeps the zone inside the window and off the HUD.
+            self.zone_scale = scale
             self.set_region(region)
+            self.landings.clear()
             self.save_settings()
 
-        RegionSelector(self, shot, selected)
+        RegionSelector(self, shot, selected, hud=self.cfg['rect'], scale=self.zone_scale)
+
+    def recenter_region(self):
+        """Move the zone (same size) to where the bobber actually landed in recent casts."""
+        if self.cfg is None or self.region is None:
+            messagebox.showinfo('Зона', 'Сначала «Указать поплавок»', parent=self)
+            return
+        try:
+            region = zone.recentred(self.region, list(self.landings), self.cfg['screen'], self.cfg['rect'])
+        except ValueError as exc:
+            messagebox.showinfo('Зона', f'{exc}. Порыбачь с наблюдением и попробуй снова.', parent=self)
+            return
+        old = self.region
+        self.set_region(region)
+        self.save_settings()
+        self.log(f'Зона сдвинута к поплавку: ({old["x"]}, {old["y"]}) → ({region["x"]}, {region["y"]})')
+
+    def note_landing(self, cast, entry, result):
+        """Remember where our bobber settled; warn when it is close to the zone edge."""
+        if entry is None or entry.get('landing') or not result.box or result.phase != 'baseline':
+            return
+        x0, y0, x1, y1 = result.box
+        point = (self.region['x'] + (x0 + x1) / 2, self.region['y'] + (y0 + y1) / 2)
+        entry['landing'] = point
+        self.landings.append(point)
+        if zone.edge_share(self.region, point) < zone.EDGE_WARNING:
+            self.log(f'Заброс {cast}: поплавок у края зоны — после остановки нажми «Подвинуть зону к поплавку»')
 
     def training(self):
         self.stop('Разметка; автонажатия остановлены')
@@ -558,11 +599,6 @@ class FishingApp(tk.Tk):
                                                 self.recasts.get())  # fmt: skip
             interact = self.cast_key.get() if self.same_key.get() else self.interact_key.get()
             self.bindings = {'cast': binding(self.cast_key.get()), 'interact': binding(interact)}
-            if self.background.get() and self.auto.get() and any(b['modifiers'] for b in self.bindings.values()):
-                raise ValueError(
-                    'В фоновом режиме нужны клавиши без Shift/Ctrl/Alt: назначь в игре, например, '
-                    '0 или F6 для рыбалки и выбери её здесь'
-                )
             self.save_settings()
         except Exception as exc:
             messagebox.showerror('Настройка рыбалки', str(exc), parent=self)
@@ -809,13 +845,14 @@ class FishingApp(tk.Tk):
             if time.monotonic() - obs.captured_at > 0.3:
                 self.stop('Кадр устарел перед нажатием')
                 return False
-            if self.background.get() and foreground_window() != self.session_window[0]:
-                result_send = post_pulse(self.session_window[0], self.bindings[action], self.focus_guard, self.halt)
-            else:
-                result_send = pulse(self.bindings[action], self.focus_guard, self.halt)
-            if result_send in ('physical_modifier_held', 'physical_key_held'):
-                # Never combine our key with one the user holds; retry on the next fresh frame.
-                self.status.set('Отпусти Shift/Ctrl/Alt или клавишу рыбалки — нажатие ждёт')
+            result_send = self.send(action)
+            if result_send in ('physical_modifier_held', 'physical_key_held', 'user_busy'):
+                # Never combine our key with one the user holds, and never switch focus while the
+                # user types or clicks elsewhere; retry on the next fresh frame (a hook only for
+                # controller.PRESS_WINDOW after the bite).
+                self.status.set('Отпусти клавиши и кнопки мыши — нажатие ждёт'
+                                if result_send == 'user_busy' else
+                                'Отпусти Shift/Ctrl/Alt или клавишу рыбалки — нажатие ждёт')  # fmt: skip
                 return False
             if result_send != 'sent':
                 self.stop('Нажатие отменено: ' + result_send)
@@ -835,6 +872,35 @@ class FishingApp(tk.Tk):
                                    'frame_at': captured_at})  # fmt: skip
         self.status.set('Автонажатия · ' + self.controller.reason)
         return sent
+
+    def send(self, action):
+        """Press the key for ``action``. Returns 'sent' or the reason it was not sent.
+
+        In the foreground: SendInput. In background mode the game is first brought to the
+        front (only while the user holds no key or mouse button), the key goes through
+        SendInput like in the foreground, so Shift/Ctrl/Alt bindings work, and focus goes
+        back to the previous window. If Windows refuses the switch, a plain key is posted to
+        the game window instead.
+        """
+        binding = self.bindings[action]
+        hwnd = self.session_window[0]
+        if not self.background.get() or foreground_window() == hwnd:
+            return pulse(binding, self.focus_guard, self.halt)
+        if input_busy():
+            return 'user_busy'
+        previous = foreground_window()
+        started = time.perf_counter()
+        if not activate(hwnd):
+            if binding['modifiers']:
+                return 'focus_switch_failed'
+            self.log('Windows не дала переключиться в игру — клавиша отправлена сообщением окну')
+            return post_pulse(hwnd, binding, self.focus_guard, self.halt)
+        time.sleep(FOCUS_SETTLE)  # let the game process its activation before the key arrives
+        self.timing['switch'].append((time.perf_counter() - started) * 1000)
+        result = pulse(binding, lambda: foreground_window() == hwnd and self.focus_guard(), self.halt)
+        if self.return_focus.get():
+            self.after(RETURN_FOCUS_MS, restore_foreground, previous, hwnd)
+        return result
 
     def relocate_hud(self, window):
         _, x, y, w, h = window
@@ -889,6 +955,7 @@ class FishingApp(tk.Tk):
         entry = self.cast_log.casts.get(obs.cast)
         if entry:
             entry['phase'] = result.phase
+        self.note_landing(obs.cast, entry, result)
         if result.score is not None:
             self.scores.append((captured_at, result.score))
         text = f'{PHASE_NAMES.get(result.phase, result.phase)}: {result.reason}'
@@ -958,7 +1025,9 @@ class FishingApp(tk.Tk):
         fps = (len(ticks) - 1) / (ticks[-1] - ticks[0]) if len(ticks) > 1 and ticks[-1] > ticks[0] else 0
         self.timing_text.set(
             f'Захват {med("grab")} мс · распознавание {med("vision")} мс · цикл {med("loop")} мс · '
-            f'≈{fps:.0f} кадров/с · кадр→нажатие {med("press")} мс · захват: {self.capture.backend}'
+            f'≈{fps:.0f} кадров/с · кадр→нажатие {med("press")} мс'
+            + (f' · переключение в игру {med("switch")} мс' if self.timing['switch'] else '')
+            + f' · захват: {self.capture.backend}'
         )
         self.draw_plot()
 
