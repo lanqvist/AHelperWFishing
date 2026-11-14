@@ -14,7 +14,7 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=2,<3",
-    "pillow>=11,<13",
+    "pillow>=11,<14",
     "sv-ttk>=2.6,<3",
 ]
 
