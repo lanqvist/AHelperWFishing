@@ -170,6 +170,24 @@ def test_lua_hud_fixture():
     assert 'OK' in out.stdout
 
 
+# -- release tooling --------------------------------------------------------------
+def test_checksums_use_lf_and_sha256sum_format(tmp_path):
+    import hashlib
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location('ahwf_build', ROOT / 'tools' / 'build.py')
+    build = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build)
+    files = []
+    for name, data in (('AHelperWFishing-Setup-9.9.9.exe', b'setup'), ('AHelperWFishing-9.9.9-portable.zip', b'zip')):
+        (tmp_path / name).write_bytes(data)
+        files.append(tmp_path / name)
+    raw = build.checksums(files, tmp_path).read_bytes()
+    assert b'\r' not in raw and raw.endswith(b'\n')
+    for line, path in zip(raw.decode('ascii').splitlines(), files, strict=True):
+        assert line == f'{hashlib.sha256(path.read_bytes()).hexdigest()} *{path.name}'
+
+
 # -- command line -----------------------------------------------------------------
 @pytest.mark.skipif(sys.platform != 'win32', reason='Windows entry point')
 def test_cli_install_addon(game, tmp_path):

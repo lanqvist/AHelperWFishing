@@ -200,10 +200,13 @@ def installer(ver, frozen, release, sign_command):
     return setup
 
 
-def checksums(files):
+def checksums(files, target_dir=DIST):
+    """SHA256SUMS.txt in `sha256sum` format with LF line endings, so `sha256sum -c` works on
+    Linux and in Git Bash (a CR would become part of the file name)."""
     lines = [f'{hashlib.sha256(f.read_bytes()).hexdigest()} *{f.name}' for f in files]
-    (DIST / 'SHA256SUMS.txt').write_text('\n'.join(lines) + '\n', encoding='utf-8')
-    return DIST / 'SHA256SUMS.txt'
+    target = Path(target_dir) / 'SHA256SUMS.txt'
+    target.write_bytes(('\n'.join(lines) + '\n').encode('ascii'))
+    return target
 
 
 def main():
