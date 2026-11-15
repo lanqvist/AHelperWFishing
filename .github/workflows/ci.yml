@@ -50,7 +50,7 @@ jobs:
         run: choco install innosetup --no-progress -y
       - run: uv sync --locked --group build
       - run: uv run --no-sync python tools/build.py
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: AHelperWFishing-${{ github.sha }}
           path: |
